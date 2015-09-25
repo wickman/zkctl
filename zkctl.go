@@ -33,7 +33,8 @@ func die(format string, a ...interface{}) {
 	os.Exit(1)
 }
 
-func constructEnsemble(ensembleString string) (*zk.Conn, <-chan zk.Event) {
+func ensembleFromContext(c *cli.Context) (*zk.Conn, <-chan zk.Event) {
+	ensembleString := c.GlobalString("ensemble")
 	members := strings.Split(ensembleString, ",")
 	for i, member := range members {
 		members[i] = strings.TrimSpace(member)
@@ -49,6 +50,54 @@ func evalCommand(c *cli.Context) {
 }
 
 func watchCommand(c *cli.Context) {
+	if len(c.Args()) != 1 {
+		die("Incorrect arguments for the read command.")
+	}
+
+	path := c.Args()[0]
+
+	conn, sessionEvents := ensembleFromContext(c)
+
+	_, _, watchEvent, err := conn.ChildrenW(path)
+
+	if err == zk.ErrNoNode {
+	    var exists bool
+		exists, _, watchEvent, err = conn.ExistsW(path)
+
+		// raced
+		if exists {
+			return
+		} else if err != nil {
+			die("Session failed, retry again shortly.  Reason: %s", err.Error())
+		}
+	} else if err != nil {
+	    die("Session failed, retry again shortly.  Reason: %s", err.Error())
+	}
+
+	for {
+		select {
+			case event := <-sessionEvents:
+				if event.State == zk.StateExpired {
+					die("Session expired, retry again shortly.")
+				} else {
+					fmt.Printf("Session state: %s server: %s\n", event.State.String(), event.Server)
+					if event.Err != nil {
+						die("Session error: %s.  Retry again shortly.", event.Err.Error())
+					}
+				}
+			case event := <-watchEvent:
+				if event.Type == zk.EventSession {
+					continue
+				} else if (event.Type == zk.EventNodeCreated ||
+							event.Type == zk.EventNodeDeleted ||
+							event.Type == zk.EventNodeChildrenChanged) {
+					fmt.Println("Detected node change.")
+					os.Exit(0)
+				} else {
+					die("Watch expired, retry again shortly.")
+				}
+		}
+	}
 }
 
 func readDigest(filename string) map[string]Member {
@@ -100,7 +149,7 @@ func readCommand(c *cli.Context) {
 	newMembers := make(map[string]Member)
 
 	// use events?
-	conn, _ := constructEnsemble(c.GlobalString("ensemble"))
+	conn, _ := ensembleFromContext(c)
 	children, _, err := conn.Children(path)
 
 	if err == zk.ErrNoNode {
