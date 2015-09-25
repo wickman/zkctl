@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"reflect"
@@ -235,6 +236,34 @@ func readCommand(c *cli.Context) {
 	}
 }
 
+func setCommand(c *cli.Context) {
+	if len(c.Args()) != 1 {
+		die("Incorrect number of arguments for set command.")
+	}
+
+	path := c.Args()[0]
+
+	content, err := ioutil.ReadAll(os.Stdin)
+	if err != nil {
+		die("Failed to read from stdin: %s", err.Error())
+	}
+	conn, _ := ensembleFromContext(c)
+
+	if _, err := conn.Set(path, content, -1); err != nil {
+		if err == zk.ErrNoNode {
+			if _, err := conn.Create(path, content, 0, zk.WorldACL(zk.PermAll)); err != nil {
+				if err == zk.ErrNoNode {
+					die("Parent znode of %s does not exist.", path)
+				} else {
+					die("Failed to create %s: %s", path, err.Error())
+				}
+			}
+		} else {
+			die("Failed to write %s: %s", path, err.Error())
+		}
+	}
+}
+
 func main() {
 	app := cli.NewApp()
 
@@ -251,19 +280,28 @@ func main() {
 
 	app.Commands = []cli.Command{
 		{
-			Name:   "select",
-			Usage:  "select a random serverset element",
-			Action: selectCommand,
+			Name:        "select",
+			Usage:       "select a random serverset element",
+			Action:      selectCommand,
+			Description: "select <path> [<port>]",
 		},
 		{
-			Name:   "watch",
-			Usage:  "watch a set until it has changed",
-			Action: watchCommand,
+			Name:        "watch",
+			Usage:       "watch a set until it has changed",
+			Action:      watchCommand,
+			Description: "watch <path>",
 		},
 		{
-			Name:   "read",
-			Usage:  "read a set and atomically update an on-disk digest",
-			Action: readCommand,
+			Name:        "read",
+			Usage:       "read a set and atomically update an on-disk digest",
+			Action:      readCommand,
+			Description: "read <path> <filename.json>",
+		},
+		{
+			Name:        "set",
+			Usage:       "set the content of a path from stdin",
+			Action:      setCommand,
+			Description: "set <path>",
 		},
 	}
 
