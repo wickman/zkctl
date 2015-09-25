@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"reflect"
 	"strings"
@@ -43,10 +44,69 @@ func ensembleFromContext(c *cli.Context) (*zk.Conn, <-chan zk.Event) {
 	if err != nil {
 		die("Failed to connect to ensemble: %s", err.Error())
 	}
-	return conn, eventChan // what is the eventChan for?
+	return conn, eventChan
 }
 
-func evalCommand(c *cli.Context) {
+func readMemberOrDie(conn *zk.Conn, path string) *Member {
+	data, _, err := conn.Get(path)
+	if err != nil {
+		if err == zk.ErrNoNode {
+			return nil
+		} else {
+			die("Get operation failed: %s", err.Error())
+		}
+	}
+
+	var member Member
+
+	if err := json.Unmarshal(data, &member); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to unmarshal member %s: %s", path, err.Error())
+	}
+
+	return &member
+}
+
+func selectCommand(c *cli.Context) {
+	if len(c.Args()) < 1 || len(c.Args()) > 3 {
+		die("Incorrect arguments for the select command.")
+	}
+
+	path := c.Args()[0]
+
+	conn, _ := ensembleFromContext(c)
+
+	for {
+		children, _, err := conn.Children(path)
+
+		if err == zk.ErrNoNode {
+			die("Uninitialized serverset at %s", path)
+		} else if err != nil {
+			die("GetChildren operation failed: %s", err.Error())
+		} else if len(children) == 0 {
+			die("No servers found in set %s", path)
+		}
+
+		rand.Seed(time.Now().UnixNano())
+		randomMember := children[rand.Int()%len(children)]
+		member := readMemberOrDie(conn, strings.Join([]string{path, randomMember}, "/"))
+
+		if member != nil {
+			if len(c.Args()) == 1 {
+				fmt.Printf("%s:%d\n", member.ServiceEndpoint.Host, member.ServiceEndpoint.Port)
+				return
+			} else {
+				port := c.Args()[1]
+				if endpoint, ok := member.AdditionalEndpoints[port]; ok {
+					fmt.Printf("%s:%d\n", endpoint.Host, endpoint.Port)
+					return
+				} else {
+					die("Endpoint missing %s port.", port)
+				}
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Node removed before read %s\n", randomMember)
+		}
+	}
 }
 
 func watchCommand(c *cli.Context) {
@@ -163,19 +223,9 @@ func readCommand(c *cli.Context) {
 		if value, ok := oldMembers[child]; ok {
 			newMembers[child] = value
 		} else {
-			data, _, err := conn.Get(strings.Join([]string{path, child}, "/"))
-			if err != nil {
-				if err == zk.ErrNoNode {
-					continue
-				} else {
-					die("Get operation failed: %s", err.Error())
-				}
-			}
-			var member Member
-			if err := json.Unmarshal(data, &member); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to unmarshal member %s: %s", child, err.Error())
-			} else {
-				newMembers[child] = member
+			member := readMemberOrDie(conn, strings.Join([]string{path, child}, "/"))
+			if member != nil {
+				newMembers[child] = *member
 			}
 		}
 	}
@@ -201,9 +251,9 @@ func main() {
 
 	app.Commands = []cli.Command{
 		{
-			Name:   "eval",
-			Usage:  "evaluate a command in the context of a (possibly random) serverset element",
-			Action: evalCommand,
+			Name:   "select",
+			Usage:  "select a random serverset element",
+			Action: selectCommand,
 		},
 		{
 			Name:   "watch",
