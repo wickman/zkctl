@@ -8,19 +8,22 @@ commands
     zkctl watch <path>
 
 
-This command watches the set at `path` and returns 0 if it has observed a change and 1 on
+`watch` watches the set at `path` and returns 0 if it has observed a change and 1 on
 any failure.
 
 
 **read**
 
-    zkctl read <path> <json>
+    zkctl read <path> <filename>
 
+`read` extracts the contents of an entire serverset at `path` and writes it into the file pointed
+at by `filename` in json format.  writes are atomic (a temporary file is written and then renamed
+to `filename`) and only take place if the set is different than the file on disk.
 
 
 **eval**
 
-    zkctl eval <path> <formatexpr>
+    zkctl eval [-port NAME] <path> <formatexpr>
 
 
 **set**
@@ -36,8 +39,11 @@ patterns
 
 **run command against random set member**
 
-    curl http://$(zkctl eval /aurora/service/prod/frontend "{hostname}:{port:http}")/api/v1/health
+    curl http://$(zkctl eval -port http /aurora/service/prod/frontend)/api/v1/health
 
+`zkctl eval` by default picks a random host in the set and prints out the `HOST:PORT`
+of the primary endpoint.  `eval` optionally takes `-port NAME` to instead pull a
+named secondary endpoint e.g. `health` or `thrift`.
 
 **keep a host list approximately up to date**
 
@@ -49,6 +55,9 @@ patterns
 
 `zkctl read` will not be performed on failure of `zkctl watch` and the operation will
 sleep a random amount of time before trying again.
+
+services reading `backend.json` should periodically stat the file and reload
+if the mtime has changed.
 
 
 **fan out a repository to all hosts on change**
