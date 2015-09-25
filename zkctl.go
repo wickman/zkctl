@@ -61,7 +61,7 @@ func watchCommand(c *cli.Context) {
 	_, _, watchEvent, err := conn.ChildrenW(path)
 
 	if err == zk.ErrNoNode {
-	    var exists bool
+		var exists bool
 		exists, _, watchEvent, err = conn.ExistsW(path)
 
 		// raced
@@ -71,31 +71,31 @@ func watchCommand(c *cli.Context) {
 			die("Session failed, retry again shortly.  Reason: %s", err.Error())
 		}
 	} else if err != nil {
-	    die("Session failed, retry again shortly.  Reason: %s", err.Error())
+		die("Session failed, retry again shortly.  Reason: %s", err.Error())
 	}
 
 	for {
 		select {
-			case event := <-sessionEvents:
-				if event.State == zk.StateExpired {
-					die("Session expired, retry again shortly.")
-				} else {
-					fmt.Printf("Session state: %s server: %s\n", event.State.String(), event.Server)
-					if event.Err != nil {
-						die("Session error: %s.  Retry again shortly.", event.Err.Error())
-					}
+		case event := <-sessionEvents:
+			if event.State == zk.StateExpired {
+				die("Session expired, retry again shortly.")
+			} else {
+				fmt.Printf("Session state: %s server: %s\n", event.State.String(), event.Server)
+				if event.Err != nil {
+					die("Session error: %s.  Retry again shortly.", event.Err.Error())
 				}
-			case event := <-watchEvent:
-				if event.Type == zk.EventSession {
-					continue
-				} else if (event.Type == zk.EventNodeCreated ||
-							event.Type == zk.EventNodeDeleted ||
-							event.Type == zk.EventNodeChildrenChanged) {
-					fmt.Println("Detected node change.")
-					os.Exit(0)
-				} else {
-					die("Watch expired, retry again shortly.")
-				}
+			}
+		case event := <-watchEvent:
+			if event.Type == zk.EventSession {
+				continue
+			} else if event.Type == zk.EventNodeCreated ||
+				event.Type == zk.EventNodeDeleted ||
+				event.Type == zk.EventNodeChildrenChanged {
+				fmt.Println("Detected node change.")
+				os.Exit(0)
+			} else {
+				die("Watch expired, retry again shortly.")
+			}
 		}
 	}
 }
