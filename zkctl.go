@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"os"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/codegangsta/cli"
 	"github.com/samuel/go-zookeeper/zk"
+	"github.com/tonnerre/golang-pretty"
 )
 
 const (
@@ -30,11 +32,6 @@ type Member struct {
 	Shard               int64               `json:"shard"`
 }
 
-func die(format string, a ...interface{}) {
-	fmt.Fprintf(os.Stderr, format+"\n", a)
-	os.Exit(1)
-}
-
 func ensembleFromContext(c *cli.Context) (*zk.Conn, <-chan zk.Event) {
 	ensembleString := c.GlobalString("ensemble")
 	members := strings.Split(ensembleString, ",")
@@ -43,33 +40,33 @@ func ensembleFromContext(c *cli.Context) (*zk.Conn, <-chan zk.Event) {
 	}
 	conn, eventChan, err := zk.Connect(members, defaultSessionTimeout)
 	if err != nil {
-		die("Failed to connect to ensemble: %s", err.Error())
+		log.Fatalf("Failed to connect to ensemble: %v", err)
 	}
 	return conn, eventChan
 }
 
-func readMemberOrDie(conn *zk.Conn, path string) *Member {
+func readMember(conn *zk.Conn, path string) (Member, error) {
 	data, _, err := conn.Get(path)
 	if err != nil {
 		if err == zk.ErrNoNode {
-			return nil
+			return Member{}, fmt.Errorf("Node %s does not exist.", path)
 		} else {
-			die("Get operation failed: %s", err.Error())
+			log.Fatalf("Get operation failed: %v", err)
 		}
 	}
 
 	var member Member
 
 	if err := json.Unmarshal(data, &member); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to unmarshal member %s: %s", path, err.Error())
+		log.Printf("Failed to unmarshal member %s: %v\n", path, err)
 	}
 
-	return &member
+	return member, nil
 }
 
 func selectCommand(c *cli.Context) {
 	if len(c.Args()) < 1 || len(c.Args()) > 3 {
-		die("Incorrect arguments for the select command.")
+		log.Fatalf("Incorrect arguments for the select command.")
 	}
 
 	path := c.Args()[0]
@@ -80,18 +77,19 @@ func selectCommand(c *cli.Context) {
 		children, _, err := conn.Children(path)
 
 		if err == zk.ErrNoNode {
-			die("Uninitialized serverset at %s", path)
+			log.Fatalf("Uninitialized serverset at %s", path)
 		} else if err != nil {
-			die("GetChildren operation failed: %s", err.Error())
+			log.Fatalf("GetChildren operation failed: %v", err)
 		} else if len(children) == 0 {
-			die("No servers found in set %s", path)
+			log.Fatalf("No servers found in set %s", path)
 		}
 
-		rand.Seed(time.Now().UnixNano())
 		randomMember := children[rand.Int()%len(children)]
-		member := readMemberOrDie(conn, strings.Join([]string{path, randomMember}, "/"))
 
-		if member != nil {
+		member, err := readMember(conn, strings.Join([]string{path, randomMember}, "/"))
+		if err != nil {
+			log.Printf("Failed to read node: %v", err)
+		} else {
 			if len(c.Args()) == 1 {
 				fmt.Printf("%s:%d\n", member.ServiceEndpoint.Host, member.ServiceEndpoint.Port)
 				return
@@ -101,18 +99,16 @@ func selectCommand(c *cli.Context) {
 					fmt.Printf("%s:%d\n", endpoint.Host, endpoint.Port)
 					return
 				} else {
-					die("Endpoint missing %s port.", port)
+					log.Fatalf("Endpoint missing %s port.", port)
 				}
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "Node removed before read %s\n", randomMember)
 		}
 	}
 }
 
 func watchCommand(c *cli.Context) {
 	if len(c.Args()) != 1 {
-		die("Incorrect arguments for the read command.")
+		log.Fatalf("Incorrect arguments for the read command.")
 	}
 
 	path := c.Args()[0]
@@ -124,29 +120,29 @@ func watchCommand(c *cli.Context) {
 	if err == zk.ErrNoNode {
 		var exists bool
 		exists, _, watchEvent, err = conn.ExistsW(path)
-
-		// raced
+		if err != nil {
+			log.Fatalf("Session failed, retry again shortly.  Reason: %v", err)
+		}
 		if exists {
 			return
-		} else if err != nil {
-			die("Session failed, retry again shortly.  Reason: %s", err.Error())
 		}
 	} else if err != nil {
-		die("Session failed, retry again shortly.  Reason: %s", err.Error())
+		log.Fatalf("Session failed, retry again shortly.  Reason: %v", err)
 	}
 
 	for {
 		select {
 		case event := <-sessionEvents:
 			if event.State == zk.StateExpired {
-				die("Session expired, retry again shortly.")
+				log.Fatalf("Session expired, retry again shortly.")
 			} else {
-				fmt.Printf("Session state: %s server: %s\n", event.State.String(), event.Server)
+				log.Printf("Session event %s: %# v", event.State.String(), pretty.Formatter(event))
 				if event.Err != nil {
-					die("Session error: %s.  Retry again shortly.", event.Err.Error())
+					log.Fatalf("Session error: %s.  Retry again shortly.", event.Err.Error())
 				}
 			}
 		case event := <-watchEvent:
+			// TODO switch
 			if event.Type == zk.EventSession {
 				continue
 			} else if event.Type == zk.EventNodeCreated ||
@@ -155,7 +151,7 @@ func watchCommand(c *cli.Context) {
 				fmt.Println("Detected node change.")
 				os.Exit(0)
 			} else {
-				die("Watch expired, retry again shortly.")
+				log.Fatalf("Watch expired, retry again shortly.")
 			}
 		}
 	}
@@ -169,13 +165,13 @@ func readDigest(filename string) map[string]Member {
 		if os.IsNotExist(err) {
 			return map[string]Member{}
 		} else {
-			die("Failed to read %s: %s", filename, err.Error())
+			log.Fatalf("Failed to read %s: %v", filename, err)
 		}
 	}
 
 	jsonParser := json.NewDecoder(jsonBlob)
 	if err := jsonParser.Decode(&members); err != nil {
-		die("Failed to decode json blob from %s: %s", filename, err.Error())
+		log.Fatalf("Failed to decode json blob from %s: %v", filename, err)
 	}
 
 	return members
@@ -184,25 +180,25 @@ func readDigest(filename string) map[string]Member {
 func writeDigest(members map[string]Member, filename string) {
 	fp, err := os.Create(filename + "~")
 	if err != nil {
-		die("Failed to create temporary digest file: %s", err.Error())
+		log.Fatalf("Failed to create temporary digest file: %v", err)
 	}
 
 	digest, err := json.Marshal(members)
 	if err != nil {
-		die("Failed to marshal contents of digest: %s", err.Error())
+		log.Fatalf("Failed to marshal contents of digest: %v", err)
 	}
 
 	fp.Write(digest)
 	fp.Close()
 
 	if err := os.Rename(filename+"~", filename); err != nil {
-		die("Failed to write new digest file: %s", err.Error())
+		log.Fatalf("Failed to write new digest file: %v", err)
 	}
 }
 
 func readCommand(c *cli.Context) {
 	if len(c.Args()) != 2 {
-		die("Incorrect arguments for the read command.")
+		log.Fatalf("Incorrect arguments for the read command.")
 	}
 
 	path := c.Args()[0]
@@ -217,16 +213,18 @@ func readCommand(c *cli.Context) {
 		writeDigest(map[string]Member{}, c.Args()[1])
 		return
 	} else if err != nil {
-		die("GetChildren operation failed: %s", err.Error())
+		log.Fatalf("GetChildren operation failed: %v", err)
 	}
 
 	for _, child := range children {
 		if value, ok := oldMembers[child]; ok {
 			newMembers[child] = value
 		} else {
-			member := readMemberOrDie(conn, strings.Join([]string{path, child}, "/"))
-			if member != nil {
-				newMembers[child] = *member
+			childPath := strings.Join([]string{path, child}, "/")
+			if member, err := readMember(conn, childPath); err != nil {
+				log.Printf("Failed to read %s.", childPath)
+			} else {
+				newMembers[child] = member
 			}
 		}
 	}
@@ -238,14 +236,14 @@ func readCommand(c *cli.Context) {
 
 func setCommand(c *cli.Context) {
 	if len(c.Args()) != 1 {
-		die("Incorrect number of arguments for set command.")
+		log.Fatalf("Incorrect number of arguments for set command.")
 	}
 
 	path := c.Args()[0]
 
 	content, err := ioutil.ReadAll(os.Stdin)
 	if err != nil {
-		die("Failed to read from stdin: %s", err.Error())
+		log.Fatalf("Failed to read from stdin: %v", err)
 	}
 	conn, _ := ensembleFromContext(c)
 
@@ -253,18 +251,20 @@ func setCommand(c *cli.Context) {
 		if err == zk.ErrNoNode {
 			if _, err := conn.Create(path, content, 0, zk.WorldACL(zk.PermAll)); err != nil {
 				if err == zk.ErrNoNode {
-					die("Parent znode of %s does not exist.", path)
+					log.Fatalf("Parent znode of %s does not exist.", path)
 				} else {
-					die("Failed to create %s: %s", path, err.Error())
+					log.Fatalf("Failed to create %s: %s", path, err)
 				}
 			}
 		} else {
-			die("Failed to write %s: %s", path, err.Error())
+			log.Fatalf("Failed to write %s: %v", path, err)
 		}
 	}
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	app := cli.NewApp()
 
 	app.Name = "zkctl"
